@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+.DS_Store
+.pytest_cache/
+.venv/
+*.egg-info/
+
+# CICIoT2023 captures and generated protocol logs can be very large.
+data/raw/
+data/zeek/
+data/sequences/
+
+artifacts/
+checkpoints/
