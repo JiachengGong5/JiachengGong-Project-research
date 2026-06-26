@@ -8,6 +8,7 @@ __pycache__/
 # CICIoT2023 captures and generated protocol logs can be very large.
 data/raw/
 data/zeek/
+data/zeek_sample/
 data/sequences/
 
 artifacts/
