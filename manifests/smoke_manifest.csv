@@ -1,0 +1,9 @@
+sequence_path,sequence_id,coarse_label,fine_label,split
+data/sequences/Benign_Final/BenignTraffic.jsonl,BenignTraffic,Benign,Benign,train
+data/sequences/DDoS-SYN_Flood/DDoS-SYN_Flood.sample.jsonl,DDoS-SYN_Flood-sample,DDoS,DDoS-SYN flood,train
+data/sequences/DNS_Spoofing/DNS_Spoofing.jsonl,DNS_Spoofing,Spoofing,Spoofing-DNS spoofing,train
+data/sequences/DictionaryBruteForce/DictionaryBruteForce.jsonl,DictionaryBruteForce,Brute Force,BruteForce-Dictionary brute force,train
+data/sequences/DoS-SYN_Flood/DoS-SYN_Flood.sample.jsonl,DoS-SYN_Flood-sample,DoS,DoS-SYN flood,train
+data/sequences/Mirai-udpplain/Mirai-udpplain.jsonl,Mirai-udpplain,Mirai,Mirai-UDPPlain,train
+data/sequences/Recon-PortScan/Recon-PortScan.jsonl,Recon-PortScan,Recon,Recon-Port scan,train
+data/sequences/SqlInjection/SqlInjection.jsonl,SqlInjection,Web-based,Web-Sql injection,train

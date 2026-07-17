@@ -153,6 +153,8 @@ def hierarchical_loss(
     *,
     coarse_weight: float = 1.0,
     fine_weight: float = 1.0,
+    coarse_class_weights: Tensor | None = None,
+    fine_class_weights_by_category: Mapping[str, Tensor] | None = None,
 ) -> Tensor:
     """Cross-entropy for the coarse head plus the matching fine head.
 
@@ -161,7 +163,7 @@ def hierarchical_loss(
     head, not within a global 34-class list.
     """
 
-    criterion = nn.CrossEntropyLoss()
+    coarse_criterion = nn.CrossEntropyLoss(weight=coarse_class_weights)
     coarse_logits = outputs["coarse"]
     fine_logits_by_category = outputs["fine"]
     if not isinstance(coarse_logits, Tensor):
@@ -169,12 +171,19 @@ def hierarchical_loss(
     if not isinstance(fine_logits_by_category, Mapping):
         raise TypeError("outputs['fine'] must be a mapping")
 
-    loss = criterion(coarse_logits, coarse_targets) * coarse_weight
+    loss = coarse_criterion(coarse_logits, coarse_targets) * coarse_weight
     for category_index, category in enumerate(category_names):
         mask = coarse_targets == category_index
         if torch.any(mask):
             fine_logits = fine_logits_by_category[category]
             if not isinstance(fine_logits, Tensor):
                 raise TypeError(f"outputs['fine'][{category!r}] must be a tensor")
-            loss = loss + criterion(fine_logits[mask], fine_targets[mask]) * fine_weight
+            fine_class_weights = None
+            if fine_class_weights_by_category is not None:
+                fine_class_weights = fine_class_weights_by_category.get(category)
+            fine_criterion = nn.CrossEntropyLoss(weight=fine_class_weights)
+            loss = (
+                loss
+                + fine_criterion(fine_logits[mask], fine_targets[mask]) * fine_weight
+            )
     return loss

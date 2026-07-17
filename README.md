@@ -7,7 +7,12 @@ directly from protocol-semantic event sequences in the
 The primary path is:
 
 ```text
-PCAP -> Zeek JSON protocol logs -> chronological semantic events -> LSTM -> class + salient activity subsequence
+PCAP
+-> Zeek JSON protocol logs
+-> chronological semantic events
+-> LSTM classification
+-> salient event span
+-> Zeek-based activity trace reconstruction
 ```
 
 The project intentionally does **not** use manually aggregated traffic
@@ -43,6 +48,12 @@ URI data.
 
 See [docs/research_plan.md](docs/research_plan.md) for the full experimental
 design and rationale.
+
+Tracking related data flows is part of the interpretation layer, not a
+separate project. The LSTM is still trained only on protocol-semantic tokens,
+but salient spans are mapped back to Zeek timestamps, `uid` values, and
+protocol logs to reconstruct the associated activity trace. See
+[docs/multi_connection_sessionization.md](docs/multi_connection_sessionization.md).
 
 ## Event Representation
 
@@ -101,3 +112,155 @@ PYTHONPATH=src python -m unittest discover -s tests -v
 chunks. It does not calculate window statistics or create overlapping rolling
 features. During evaluation, every chunk from the same original capture must
 remain in the same train, validation, or test partition.
+
+## Phase 2 Smoke Data
+
+After a few PCAP files have been converted into sequence JSONL files, build a
+training manifest:
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/build_manifest.py \
+  --sequence-root data/sequences \
+  --output manifests/smoke_manifest.csv
+```
+
+Build a vocabulary from the training split only:
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/build_vocab.py \
+  --manifest manifests/smoke_manifest.csv \
+  --output artifacts/smoke_vocab.json
+```
+
+The manifest is small and can be versioned. The vocabulary is generated from
+local data and is stored under `artifacts/`, which is ignored by Git.
+
+Run a small training smoke test:
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/train_smoke.py \
+  --epochs 10 \
+  --batch-size 16 \
+  --max-events 128 \
+  --output-dir runs/smoke_overfit
+```
+
+This run intentionally evaluates on the same smoke data. It is an engineering
+sanity check for the training loop, not a publishable model score.
+
+Generate development evaluation tables from a trained checkpoint:
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/evaluate_hierarchical.py \
+  --manifest manifests/dev_chunk_manifest.csv \
+  --vocab artifacts/dev_vocab.json \
+  --checkpoint runs/hierarchical_dev/best_model.pt \
+  --output-dir artifacts/evaluation_dev
+```
+
+Extract salient activity spans and reconstruct their Zeek traces:
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/extract_activity_patterns.py \
+  --manifest manifests/dev_chunk_manifest.csv \
+  --vocab artifacts/dev_vocab.json \
+  --checkpoint runs/hierarchical_dev/best_model.pt \
+  --output-dir artifacts/activity_patterns_dev
+```
+
+## Development Train/Validation Split
+
+When the local subset has only one downloaded PCAP per class, use a
+stratified chunk-level split only as a development check:
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/build_dev_split_manifest.py \
+  --sequence-root data/sequences \
+  --output manifests/dev_chunk_manifest.csv
+
+PYTHONPATH=src .venv/bin/python scripts/build_vocab.py \
+  --manifest manifests/dev_chunk_manifest.csv \
+  --split train \
+  --output artifacts/dev_vocab.json
+
+PYTHONPATH=src .venv/bin/python scripts/train_hierarchical.py \
+  --manifest manifests/dev_chunk_manifest.csv \
+  --vocab artifacts/dev_vocab.json \
+  --epochs 10 \
+  --batch-size 16 \
+  --max-events 128 \
+  --class-weighting balanced \
+  --output-dir runs/hierarchical_dev
+```
+
+This split is useful for catching modeling and imbalance issues early. It is
+not a final evaluation protocol because chunks from the same capture can land
+in both train and validation. Final reported results should use
+capture-disjoint splits after multiple captures per class are available.
+
+## Expanding To 8 Classes
+
+Check which coarse classes are currently present:
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/check_data_coverage.py
+```
+
+After downloading new PCAP folders under `data/raw/<label>/`, process them:
+
+If the browser downloads the PCAP files to `~/Downloads`, import them first:
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/import_downloaded_pcaps.py
+```
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/process_raw_pcaps.py \
+  --only DoS-SYN_Flood \
+  --only DNS_Spoofing \
+  --only DictionaryBruteForce \
+  --only Mirai-udpplain \
+  --only SqlInjection
+```
+
+For very large flood captures, use a Zeek-log sample for the first validation
+run:
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/process_raw_pcaps.py \
+  --only DoS-SYN_Flood \
+  --sample-conn-lines 200000
+```
+
+See [docs/8class_expansion_plan.md](docs/8class_expansion_plan.md) for the
+download checklist and full command sequence.
+
+## Expanding To Full Fine Labels
+
+The current hierarchical model supports the full CICIoT2023 label hierarchy,
+but local data coverage must be complete before reporting 33-attack
+fine-label results.
+
+Generate a coarse and fine coverage report:
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/check_data_coverage.py \
+  --output-dir artifacts/coverage
+```
+
+The report identifies missing PCAP folders and writes:
+
+```text
+artifacts/coverage/coverage_report.md
+artifacts/coverage/missing_downloads.csv
+```
+
+After full fine-label coverage is downloaded and processed, use
+`scripts/evaluate_hierarchical.py` to report:
+
+- coarse 8-class metrics,
+- fine-label metrics within the true coarse category,
+- path accuracy where both coarse and fine labels are correct.
+
+See [docs/full_dataset_expansion_plan.md](docs/full_dataset_expansion_plan.md)
+for the current missing-download checklist and command sequence.

@@ -57,9 +57,22 @@ class ModelTests(unittest.TestCase):
             fine_targets,
             CATEGORY_NAMES,
         )
+        weighted_loss = hierarchical_loss(
+            outputs,
+            coarse_targets,
+            fine_targets,
+            CATEGORY_NAMES,
+            coarse_class_weights=torch.ones(len(CATEGORY_NAMES)),
+            fine_class_weights_by_category={
+                category: torch.ones(num_fine)
+                for category, num_fine in CATEGORY_TO_NUM_FINE.items()
+            },
+        )
 
         self.assertEqual(loss.ndim, 0)
         self.assertTrue(torch.isfinite(loss))
+        self.assertEqual(weighted_loss.ndim, 0)
+        self.assertTrue(torch.isfinite(weighted_loss))
 
 
 if __name__ == "__main__":

@@ -104,7 +104,29 @@ Later, sequences can be organized per IoT device when reliable device metadata
 is available. Device-level grouping is preferable for measuring
 generalization to unseen devices.
 
-## 7. Model and Pattern Identification
+## 7. Activity Trace Reconstruction
+
+Tracking related connections is part of the activity-pattern interpretation
+layer. The main representation remains globally timestamp-sorted Zeek events
+split into non-overlapping contiguous chunks, and the model is still trained
+without leakage-prone identifiers such as IP addresses or Zeek `uid`.
+
+After prediction, salient event spans are mapped back to the original Zeek
+logs using timestamps, log type, and `uid` values. This reconstruction links
+related `conn.log`, `dns.log`, `http.log`, `ssl.log`, and `weird.log` records
+so the output is not just a class label, but a readable activity trace.
+
+This design keeps model learning and trace reconstruction separate:
+
+- The LSTM input receives only protocol-semantic event tokens.
+- The interpretation layer may use Zeek `uid`, timestamps, and raw log fields
+  to explain which connections and protocol records formed the identified
+  activity.
+
+See `docs/multi_connection_sessionization.md` for the trace-reconstruction
+note.
+
+## 8. Model and Pattern Identification
 
 ### Hierarchical classification model
 
@@ -150,7 +172,7 @@ DNS spoofing:
 
 These are examples of the desired output form, not hard-coded rules.
 
-## 8. Experiments
+## 9. Experiments
 
 ### Primary experiments
 
@@ -183,11 +205,16 @@ character/byte encoder rather than manually designed payload features.
 These ablations test representation choices without calculating statistical
 traffic summaries.
 
-## 9. Evaluation Design
+## 10. Evaluation Design
 
 Use capture/scenario/device-grouped splits, not random row or event splits.
 Random splits can place nearly identical flood traffic from one attack run in
 both training and test data and produce misleadingly high scores.
+
+During early local development, a stratified chunk-level validation split may
+be used only to debug the training loop and class-imbalance strategy when
+there is only one downloaded capture per class. Do not report that score as
+the final experimental result.
 
 Report:
 
@@ -203,7 +230,7 @@ Report:
 
 Accuracy alone is not sufficient because CICIoT2023 is highly imbalanced.
 
-## 10. Risks and Mitigations
+## 11. Risks and Mitigations
 
 ### Flood classes dominate
 
@@ -228,7 +255,15 @@ HTTP method and connection state cannot reliably separate SQL injection, XSS,
 command injection, and related attacks. Limit the initial claim to categories,
 then add a learned raw URI/payload encoder for fine-grained classification.
 
-## 11. Proposed Milestones
+### Multi-connection activity ambiguity
+
+Some samples may involve related events across multiple connections or Zeek
+logs, while unrelated background traffic may be interleaved. The baseline
+preserves chronological order. If this ambiguity affects a class or error
+case, handle it locally through inspection or an optional ablation, while
+avoiding leakage-prone identifiers in model input.
+
+## 12. Proposed Milestones
 
 ### Phase 1: Data and validity
 
@@ -254,7 +289,7 @@ then add a learned raw URI/payload encoder for fine-grained classification.
 - Optionally add a learned byte/character branch for 34-class classification.
 - Complete error analysis, performance evaluation, report, and presentation.
 
-## 12. Recommended Thesis Claim
+## 13. Recommended Thesis Claim
 
 > This project investigates whether ordered protocol-semantic events extracted
 > from raw CICIoT2023 packet captures can support interpretable intrusion

@@ -60,6 +60,13 @@ addresses, capture identifiers, and traditional flow summaries such as
 duration, byte totals, packet counts, rates, averages, standard deviations,
 and sliding-window aggregates will not be supplied to the proposed model.
 
+If inspection shows that a specific CICIoT2023 sample involves related events
+across multiple connections or logs, that case will be handled as a
+data-processing note or optional ablation. Zeek already performs low-level
+connection and protocol reconstruction; additional grouping will not be a
+primary change to the experimental plan unless the data analysis shows it is
+necessary.
+
 ### End-to-end hierarchical sequence learning
 
 The model will use learned embeddings to represent the categorical fields
