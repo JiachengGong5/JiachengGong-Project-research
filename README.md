@@ -40,6 +40,10 @@ For example, the Recon head distinguishes ping sweep, OS scan, vulnerability
 scan, port scan, and host discovery; the Web-based head distinguishes SQL
 injection, command injection, XSS, and related attacks.
 
+The current local checkpoint covers all 33 official CICIoT2023 attacks plus
+Benign, for 34 output labels. This is complete label coverage, but several rare
+labels still have too few chunks for a reliable class-level claim.
+
 Protocol state alone is not sufficient to reliably distinguish every fine
 attack type. For example, SQL injection and XSS can share the same HTTP method
 and connection state. The hierarchical 33-attack extension should add an
@@ -110,8 +114,8 @@ PYTHONPATH=src python -m unittest discover -s tests -v
 
 `--max-events` only splits a very long capture into contiguous memory-sized
 chunks. It does not calculate window statistics or create overlapping rolling
-features. During evaluation, every chunk from the same original capture must
-remain in the same train, validation, or test partition.
+features. The development workflow below assigns parent chunks to a split and
+then ensures that every smaller child segment inherits that parent split.
 
 ## Phase 2 Smoke Data
 
@@ -178,25 +182,40 @@ PYTHONPATH=src .venv/bin/python scripts/build_dev_split_manifest.py \
   --sequence-root data/sequences \
   --output manifests/dev_chunk_manifest.csv
 
-PYTHONPATH=src .venv/bin/python scripts/build_vocab.py \
+PYTHONPATH=src .venv/bin/python scripts/rechunk_sequences.py \
   --manifest manifests/dev_chunk_manifest.csv \
+  --output-root data/sequences_windowed \
+  --output-manifest manifests/dev_event_manifest.csv \
+  --max-events 256
+
+PYTHONPATH=src .venv/bin/python scripts/build_vocab.py \
+  --manifest manifests/dev_event_manifest.csv \
   --split train \
   --output artifacts/dev_vocab.json
 
 PYTHONPATH=src .venv/bin/python scripts/train_hierarchical.py \
-  --manifest manifests/dev_chunk_manifest.csv \
+  --manifest manifests/dev_event_manifest.csv \
   --vocab artifacts/dev_vocab.json \
-  --epochs 10 \
-  --batch-size 16 \
-  --max-events 128 \
+  --epochs 4 \
+  --batch-size 64 \
+  --max-events 256 \
   --class-weighting balanced \
-  --output-dir runs/hierarchical_dev
+  --fine-class-weighting balanced \
+  --coarse-loss-weight 1.0 \
+  --fine-loss-weight 0.25 \
+  --fine-loss-reduction sample_mean \
+  --output-dir runs/hierarchical_event256_joint
 ```
 
 This split is useful for catching modeling and imbalance issues early. It is
 not a final evaluation protocol because chunks from the same capture can land
 in both train and validation. Final reported results should use
 capture-disjoint splits after multiple captures per class are available.
+
+The split-preserving re-chunking stage retains all 13,149,952 current protocol
+events exactly once in non-overlapping 256-event segments. It raises model
+event coverage from 3.1% in the previous prefix-truncation baseline to 100%
+without adding manual statistical features.
 
 ## Expanding To 8 Classes
 

@@ -19,6 +19,7 @@ CATEGORY_TO_FINE_LABELS: dict[str, tuple[str, ...]] = {
         "DDoS-TCP flood",
         "DDoS-SYN flood",
         "DDoS-SynonymousIP flood",
+        "DDoS-ICMP fragmentation",
     ),
     "DoS": (
         "DoS-TCP flood",

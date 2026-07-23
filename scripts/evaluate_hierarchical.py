@@ -15,6 +15,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 import torch  # noqa: E402
+from torch.utils.data import DataLoader  # noqa: E402
 
 from activity_patterns.dataset import (  # noqa: E402
     SequenceChunkDataset,
@@ -39,6 +40,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--checkpoint", default="runs/hierarchical_dev/best_model.pt")
     parser.add_argument("--split", default="val")
     parser.add_argument("--max-events", type=int, default=128)
+    parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--output-dir", default="artifacts/evaluation_dev")
     return parser
 
@@ -173,6 +175,8 @@ def evaluate_dataset(
     model: HierarchicalProtocolEventLSTM,
     dataset: SequenceChunkDataset,
     device: torch.device,
+    *,
+    batch_size: int = 64,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     predictions = []
     coarse_targets = []
@@ -181,53 +185,89 @@ def evaluate_dataset(
     fine_predicted_for_true_category = []
     path_correct = 0
 
-    for index in range(len(dataset)):
-        item = dataset[index]
-        row = dataset.rows[dataset.refs[index].row_index]
-        batch = move_batch(collate_sequence_chunks([item]), device)
+    loader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        collate_fn=collate_sequence_chunks,
+    )
+    dataset_offset = 0
+    for raw_batch in loader:
+        batch = move_batch(raw_batch, device)
         outputs = model(batch["token_ids"], batch["lengths"])
         coarse_logits = outputs["coarse"]
         if not isinstance(coarse_logits, torch.Tensor):
             raise TypeError("outputs['coarse'] must be a tensor")
-        coarse_probs = torch.softmax(coarse_logits[0], dim=0)
-        pred_index = int(torch.argmax(coarse_probs).detach().cpu())
-        true_index = int(item["coarse_target"])
-        pred_category, pred_fine_index = fine_prediction(outputs, pred_index)
-        pred_fine_label = fine_label_from_category_index(pred_category, pred_fine_index)
-        true_category = item["coarse_label"]
-        true_category_fine_index, true_category_fine_label = category_fine_prediction(
-            outputs,
-            true_category,
-        )
-        fine_target_index = FINE_LABEL_NAMES.index(item["fine_label"])
-        fine_pred_index = FINE_LABEL_NAMES.index(true_category_fine_label)
-        coarse_correct = pred_index == true_index
-        fine_correct_given_true_category = true_category_fine_label == item["fine_label"]
-        path_is_correct = coarse_correct and pred_fine_label == item["fine_label"]
-        path_correct += int(path_is_correct)
+        fine_logits_by_category = outputs["fine"]
+        if not isinstance(fine_logits_by_category, dict):
+            raise TypeError("outputs['fine'] must be a dict")
+        coarse_probs_batch = torch.softmax(coarse_logits, dim=1)
+        pred_indices = torch.argmax(coarse_probs_batch, dim=1)
+        current_batch_size = int(coarse_logits.shape[0])
 
-        record = {
-            "sequence_path": row.sequence_path.as_posix(),
-            "sequence_id": item["sequence_id"],
-            "chunk_index": item["chunk_index"],
-            "true_coarse": item["coarse_label"],
-            "true_fine": item["fine_label"],
-            "pred_coarse": pred_category,
-            "pred_fine_index": pred_fine_index,
-            "pred_fine": pred_fine_label,
-            "pred_fine_given_true_category": true_category_fine_label,
-            "pred_fine_given_true_category_index": true_category_fine_index,
-            "pred_coarse_confidence": float(coarse_probs[pred_index].detach().cpu()),
-            "coarse_correct": coarse_correct,
-            "fine_correct_given_true_category": fine_correct_given_true_category,
-            "path_correct": path_is_correct,
-            "correct": path_is_correct,
-        }
-        predictions.append(record)
-        coarse_targets.append(true_index)
-        coarse_predicted.append(pred_index)
-        fine_targets.append(fine_target_index)
-        fine_predicted_for_true_category.append(fine_pred_index)
+        for local_index in range(current_batch_size):
+            dataset_index = dataset_offset + local_index
+            row = dataset.rows[dataset.refs[dataset_index].row_index]
+            pred_index = int(pred_indices[local_index].detach().cpu())
+            true_index = int(batch["coarse_targets"][local_index].detach().cpu())
+            pred_category = CATEGORY_NAMES[pred_index]
+            pred_fine_logits = fine_logits_by_category[pred_category]
+            if not isinstance(pred_fine_logits, torch.Tensor):
+                raise TypeError(f"outputs['fine'][{pred_category!r}] must be a tensor")
+            pred_fine_index = int(
+                torch.argmax(pred_fine_logits[local_index]).detach().cpu()
+            )
+            pred_fine_label = fine_label_from_category_index(
+                pred_category, pred_fine_index
+            )
+            true_category = raw_batch["coarse_labels"][local_index]
+            true_fine_label = raw_batch["fine_labels"][local_index]
+            true_category_logits = fine_logits_by_category[true_category]
+            if not isinstance(true_category_logits, torch.Tensor):
+                raise TypeError(f"outputs['fine'][{true_category!r}] must be a tensor")
+            true_category_fine_index = int(
+                torch.argmax(true_category_logits[local_index]).detach().cpu()
+            )
+            true_category_fine_label = fine_label_from_category_index(
+                true_category, true_category_fine_index
+            )
+            fine_target_index = FINE_LABEL_NAMES.index(true_fine_label)
+            fine_pred_index = FINE_LABEL_NAMES.index(true_category_fine_label)
+            coarse_correct = pred_index == true_index
+            fine_correct_given_true_category = (
+                true_category_fine_label == true_fine_label
+            )
+            path_is_correct = coarse_correct and pred_fine_label == true_fine_label
+            path_correct += int(path_is_correct)
+
+            record = {
+                "sequence_path": row.sequence_path.as_posix(),
+                "sequence_id": raw_batch["sequence_ids"][local_index],
+                "chunk_index": raw_batch["chunk_indices"][local_index],
+                "source_chunk_index": raw_batch["source_chunk_indices"][local_index],
+                "event_start": raw_batch["event_starts"][local_index],
+                "event_stop": raw_batch["event_stops"][local_index],
+                "true_coarse": true_category,
+                "true_fine": true_fine_label,
+                "pred_coarse": pred_category,
+                "pred_fine_index": pred_fine_index,
+                "pred_fine": pred_fine_label,
+                "pred_fine_given_true_category": true_category_fine_label,
+                "pred_fine_given_true_category_index": true_category_fine_index,
+                "pred_coarse_confidence": float(
+                    coarse_probs_batch[local_index, pred_index].detach().cpu()
+                ),
+                "coarse_correct": coarse_correct,
+                "fine_correct_given_true_category": fine_correct_given_true_category,
+                "path_correct": path_is_correct,
+                "correct": path_is_correct,
+            }
+            predictions.append(record)
+            coarse_targets.append(true_index)
+            coarse_predicted.append(pred_index)
+            fine_targets.append(fine_target_index)
+            fine_predicted_for_true_category.append(fine_pred_index)
+        dataset_offset += current_batch_size
 
     coarse_confusion = build_confusion_matrix(
         coarse_targets,
@@ -296,7 +336,12 @@ def main() -> None:
         raise ValueError(f"No chunks found for split {args.split!r}")
 
     model = load_model(args.checkpoint, len(vocab), device)
-    predictions, metrics = evaluate_dataset(model, dataset, device)
+    predictions, metrics = evaluate_dataset(
+        model,
+        dataset,
+        device,
+        batch_size=args.batch_size,
+    )
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)

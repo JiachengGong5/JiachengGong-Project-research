@@ -10,6 +10,7 @@ data/raw/
 data/zeek/
 data/zeek_sample/
 data/sequences/
+data/sequences_windowed/
 
 artifacts/
 checkpoints/

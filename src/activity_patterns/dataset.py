@@ -120,6 +120,8 @@ class SequenceChunkDataset(Dataset[dict[str, Any]]):
         if self.max_events is not None:
             events = events[: self.max_events]
 
+        event_start = int(payload.get("event_start", 0))
+
         token_ids = [
             self.vocab.encode_event(event.get("tokens", []))
             for event in events
@@ -129,6 +131,11 @@ class SequenceChunkDataset(Dataset[dict[str, Any]]):
             "length": len(token_ids),
             "sequence_id": payload.get("sequence_id", row.sequence_id),
             "chunk_index": int(payload.get("chunk_index", 0)),
+            "source_chunk_index": int(
+                payload.get("source_chunk_index", payload.get("chunk_index", 0))
+            ),
+            "event_start": event_start,
+            "event_stop": event_start + len(events),
             "coarse_label": row.coarse_label,
             "fine_label": row.fine_label,
             "coarse_target": category_index(row.coarse_label),
@@ -170,5 +177,8 @@ def collate_sequence_chunks(batch: list[dict[str, Any]]) -> dict[str, Any]:
         "fine_labels": [item["fine_label"] for item in batch],
         "sequence_ids": [item["sequence_id"] for item in batch],
         "chunk_indices": [item["chunk_index"] for item in batch],
+        "source_chunk_indices": [item["source_chunk_index"] for item in batch],
+        "event_starts": [item["event_start"] for item in batch],
+        "event_stops": [item["event_stop"] for item in batch],
         "category_names": CATEGORY_NAMES,
     }

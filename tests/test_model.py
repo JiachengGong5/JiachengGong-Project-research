@@ -74,6 +74,45 @@ class ModelTests(unittest.TestCase):
         self.assertEqual(weighted_loss.ndim, 0)
         self.assertTrue(torch.isfinite(weighted_loss))
 
+    def test_fine_loss_is_sample_normalized_and_can_be_disabled(self):
+        outputs = {
+            "coarse": torch.zeros((3, 2)),
+            "fine": {
+                "A": torch.zeros((3, 2)),
+                "B": torch.zeros((3, 2)),
+            },
+        }
+        coarse_targets = torch.tensor([0, 0, 1])
+        fine_targets = torch.tensor([0, 1, 0])
+
+        sample_mean = hierarchical_loss(
+            outputs,
+            coarse_targets,
+            fine_targets,
+            ("A", "B"),
+            fine_loss_reduction="sample_mean",
+        )
+        category_sum = hierarchical_loss(
+            outputs,
+            coarse_targets,
+            fine_targets,
+            ("A", "B"),
+            fine_loss_reduction="category_sum",
+        )
+        coarse_only = hierarchical_loss(
+            outputs,
+            coarse_targets,
+            fine_targets,
+            ("A", "B"),
+            fine_weight=0.0,
+        )
+        expected_coarse = torch.nn.functional.cross_entropy(
+            outputs["coarse"], coarse_targets
+        )
+
+        self.assertTrue(torch.allclose(coarse_only, expected_coarse))
+        self.assertGreater(float(category_sum), float(sample_mean))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -55,6 +55,22 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dropout", type=float, default=0.1)
     parser.add_argument("--learning-rate", type=float, default=1e-3)
     parser.add_argument("--seed", type=int, default=7)
+    parser.add_argument("--coarse-loss-weight", type=float, default=1.0)
+    parser.add_argument("--fine-loss-weight", type=float, default=1.0)
+    parser.add_argument(
+        "--fine-loss-reduction",
+        choices=("sample_mean", "category_sum"),
+        default="sample_mean",
+        help=(
+            "Normalize fine loss across samples, or reproduce the legacy sum "
+            "of one mean loss per category"
+        ),
+    )
+    parser.add_argument(
+        "--coarse-only",
+        action="store_true",
+        help="Train only the coarse objective; equivalent to --fine-loss-weight 0",
+    )
     parser.add_argument(
         "--class-weighting",
         choices=("balanced", "none"),
@@ -221,6 +237,9 @@ def run_epoch(
     device: torch.device,
     coarse_class_weights: torch.Tensor | None,
     fine_class_weights_by_category: dict[str, torch.Tensor] | None,
+    coarse_loss_weight: float,
+    fine_loss_weight: float,
+    fine_loss_reduction: str,
 ) -> dict[str, float]:
     model.train()
     total_loss = 0.0
@@ -237,6 +256,9 @@ def run_epoch(
             batch["coarse_targets"],
             batch["fine_targets"],
             CATEGORY_NAMES,
+            coarse_weight=coarse_loss_weight,
+            fine_weight=fine_loss_weight,
+            fine_loss_reduction=fine_loss_reduction,
             coarse_class_weights=coarse_class_weights,
             fine_class_weights_by_category=fine_class_weights_by_category,
         )
@@ -273,6 +295,9 @@ def evaluate(
     device: torch.device,
     coarse_class_weights: torch.Tensor | None,
     fine_class_weights_by_category: dict[str, torch.Tensor] | None,
+    coarse_loss_weight: float,
+    fine_loss_weight: float,
+    fine_loss_reduction: str,
 ) -> dict[str, Any]:
     model.eval()
     total_loss = 0.0
@@ -290,6 +315,9 @@ def evaluate(
             batch["coarse_targets"],
             batch["fine_targets"],
             CATEGORY_NAMES,
+            coarse_weight=coarse_loss_weight,
+            fine_weight=fine_loss_weight,
+            fine_loss_reduction=fine_loss_reduction,
             coarse_class_weights=coarse_class_weights,
             fine_class_weights_by_category=fine_class_weights_by_category,
         )
@@ -349,6 +377,12 @@ def print_fine_counts(name: str, counts_by_category: dict[str, list[int]]) -> No
 
 def main() -> None:
     args = build_parser().parse_args()
+    if args.coarse_only:
+        args.fine_loss_weight = 0.0
+    if args.coarse_loss_weight < 0.0 or args.fine_loss_weight < 0.0:
+        raise ValueError("Loss weights must be non-negative")
+    if args.coarse_loss_weight == 0.0 and args.fine_loss_weight == 0.0:
+        raise ValueError("At least one loss weight must be positive")
     set_seed(args.seed)
     device = choose_device()
 
@@ -392,7 +426,7 @@ def main() -> None:
     if args.class_weighting == "balanced":
         coarse_class_weights = balanced_weights(train_counts, device)
     fine_class_weights_by_category = None
-    if args.fine_class_weighting == "balanced":
+    if args.fine_class_weighting == "balanced" and args.fine_loss_weight > 0.0:
         fine_class_weights_by_category = balanced_fine_weights_by_category(
             train_fine_counts,
             device,
@@ -412,6 +446,11 @@ def main() -> None:
     print(
         f"train_chunks={len(train_dataset)} val_chunks={len(val_dataset)} "
         f"vocab={len(vocab)} max_events={args.max_events}"
+    )
+    print(
+        f"coarse_loss_weight={args.coarse_loss_weight:.3f} "
+        f"fine_loss_weight={args.fine_loss_weight:.3f} "
+        f"fine_loss_reduction={args.fine_loss_reduction}"
     )
     print_counts("train", train_counts)
     print_counts("val", val_counts)
@@ -450,6 +489,9 @@ def main() -> None:
             device,
             coarse_class_weights,
             fine_class_weights_by_category,
+            args.coarse_loss_weight,
+            args.fine_loss_weight,
+            args.fine_loss_reduction,
         )
         val_metrics = evaluate(
             model,
@@ -457,6 +499,9 @@ def main() -> None:
             device,
             coarse_class_weights,
             fine_class_weights_by_category,
+            args.coarse_loss_weight,
+            args.fine_loss_weight,
+            args.fine_loss_reduction,
         )
         history.append(
             {

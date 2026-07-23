@@ -380,8 +380,8 @@ def write_markdown(
         "",
         f"- Manifest: `{args.manifest}`",
         f"- Evaluation directory: `{args.evaluation_dir}`",
-        f"- Low validation support threshold: `{args.min_val_support}` chunks",
-        f"- Severe total support threshold: `{args.min_total_support}` chunks",
+        f"- Low validation support threshold: `{args.min_val_support}` sequence rows",
+        f"- Severe total support threshold: `{args.min_total_support}` sequence rows",
         f"- Low F1 threshold: `{args.low_f1_threshold}`",
         "",
         "## Headline Metrics",
@@ -396,7 +396,9 @@ def write_markdown(
         "## Data Sufficiency",
         "",
         f"- Fine labels included in the pipeline: `{len(rows)}`",
-        f"- Chunk rows: `{total_chunks}` total, `{train_chunks}` train, `{val_chunks}` val",
+        f"- Sequence rows: `{total_chunks}` total, `{train_chunks}` train, `{val_chunks}` val",
+        "- Support rows are not independent captures. Re-chunked child segments "
+        "inherit their parent split and must not be counted as new PCAPs.",
         f"- Severe-scarcity fine labels: `{len(scarce_rows)}`",
         f"- Low-validation-support fine labels: `{len(low_val_rows)}`",
         f"- Low-F1 labels with enough validation support: `{len(low_f1_with_support)}`",
@@ -470,9 +472,9 @@ def write_markdown(
             "",
             "## Recommended Next Experiment",
             "",
-            "1. Keep the current result as the first complete 33-fine-label "
-            "hierarchical run. It proves the end-to-end Zeek-to-LSTM pipeline "
-            "works across the full local CICIoT2023 hierarchy.",
+            "1. Keep the current result as the first complete 34-output-label "
+            "hierarchical run (33 attacks plus Benign). It proves the end-to-end "
+            "Zeek-to-LSTM pipeline works across the full local CICIoT2023 hierarchy.",
             "2. Do not treat one fixed split as the final authority for labels "
             "with fewer than five validation chunks. Use repeated fine-stratified "
             "splits or leave-one-chunk-out for those rare labels.",

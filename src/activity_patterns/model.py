@@ -153,6 +153,7 @@ def hierarchical_loss(
     *,
     coarse_weight: float = 1.0,
     fine_weight: float = 1.0,
+    fine_loss_reduction: str = "sample_mean",
     coarse_class_weights: Tensor | None = None,
     fine_class_weights_by_category: Mapping[str, Tensor] | None = None,
 ) -> Tensor:
@@ -171,7 +172,21 @@ def hierarchical_loss(
     if not isinstance(fine_logits_by_category, Mapping):
         raise TypeError("outputs['fine'] must be a mapping")
 
+    if coarse_weight < 0.0 or fine_weight < 0.0:
+        raise ValueError("coarse_weight and fine_weight must be non-negative")
+    if coarse_weight == 0.0 and fine_weight == 0.0:
+        raise ValueError("At least one hierarchical loss weight must be positive")
+    if fine_loss_reduction not in {"sample_mean", "category_sum"}:
+        raise ValueError(
+            "fine_loss_reduction must be 'sample_mean' or 'category_sum'"
+        )
+
     loss = coarse_criterion(coarse_logits, coarse_targets) * coarse_weight
+    if fine_weight == 0.0:
+        return loss
+
+    fine_loss_numerator = coarse_logits.new_zeros(())
+    fine_loss_denominator = coarse_logits.new_zeros(())
     for category_index, category in enumerate(category_names):
         mask = coarse_targets == category_index
         if torch.any(mask):
@@ -181,9 +196,33 @@ def hierarchical_loss(
             fine_class_weights = None
             if fine_class_weights_by_category is not None:
                 fine_class_weights = fine_class_weights_by_category.get(category)
-            fine_criterion = nn.CrossEntropyLoss(weight=fine_class_weights)
-            loss = (
-                loss
-                + fine_criterion(fine_logits[mask], fine_targets[mask]) * fine_weight
+            category_targets = fine_targets[mask]
+            if fine_loss_reduction == "category_sum":
+                fine_criterion = nn.CrossEntropyLoss(weight=fine_class_weights)
+                loss = loss + fine_criterion(
+                    fine_logits[mask], category_targets
+                ) * fine_weight
+                continue
+
+            category_losses = nn.functional.cross_entropy(
+                fine_logits[mask],
+                category_targets,
+                weight=fine_class_weights,
+                reduction="none",
             )
+            fine_loss_numerator = fine_loss_numerator + category_losses.sum()
+            if fine_class_weights is None:
+                fine_loss_denominator = (
+                    fine_loss_denominator + category_targets.numel()
+                )
+            else:
+                fine_loss_denominator = (
+                    fine_loss_denominator
+                    + fine_class_weights[category_targets].sum()
+                )
+
+    if fine_loss_reduction == "sample_mean":
+        loss = loss + fine_weight * (
+            fine_loss_numerator / fine_loss_denominator.clamp_min(1e-12)
+        )
     return loss

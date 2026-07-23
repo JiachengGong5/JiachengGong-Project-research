@@ -5,6 +5,7 @@ import unittest
 
 from activity_patterns.coverage import FINE_LABEL_TO_FOLDER
 from activity_patterns.labels import (
+    CATEGORY_TO_FINE_LABELS,
     FINE_LABEL_NAMES,
     canonical_fine_label,
     category_index,
@@ -19,6 +20,7 @@ from activity_patterns.manifest import (
     write_manifest,
 )
 from activity_patterns.vocab import PAD_TOKEN, UNK_TOKEN, build_vocab
+from activity_patterns.rechunk import rechunk_manifest_rows
 
 try:
     import torch
@@ -73,6 +75,10 @@ class LabelTests(unittest.TestCase):
     def test_dataset_folder_labels_normalize_to_canonical_hierarchy(self):
         self.assertEqual(canonical_fine_label("Benign_Final"), "Benign")
         self.assertEqual(canonical_fine_label("DDoS-SYN_Flood"), "DDoS-SYN flood")
+        self.assertEqual(
+            canonical_fine_label("DDoS-ICMP_Fragmentation"),
+            "DDoS-ICMP fragmentation",
+        )
         self.assertEqual(canonical_fine_label("Recon-PortScan"), "Recon-Port scan")
         self.assertEqual(coarse_label_for_fine("Recon-PortScan"), "Recon")
         self.assertEqual(category_index("Recon"), 3)
@@ -83,6 +89,8 @@ class LabelTests(unittest.TestCase):
         )
 
     def test_all_fine_labels_have_download_folder_names(self):
+        self.assertEqual(len(FINE_LABEL_NAMES), 34)
+        self.assertEqual(len(CATEGORY_TO_FINE_LABELS["DDoS"]), 12)
         self.assertEqual(set(FINE_LABEL_TO_FOLDER), set(FINE_LABEL_NAMES))
         self.assertEqual(
             canonical_fine_label(FINE_LABEL_TO_FOLDER["DDoS-ACK fragmentation"]),
@@ -95,6 +103,65 @@ class LabelTests(unittest.TestCase):
 
 
 class ManifestAndVocabTests(unittest.TestCase):
+    def test_rechunk_preserves_events_labels_and_parent_splits(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            source_path = (
+                root
+                / "data"
+                / "sequences"
+                / "Benign_Final"
+                / "BenignTraffic.jsonl"
+            )
+            write_sequence(source_path, "BenignTraffic", "Benign")
+            rows = [
+                ManifestRow(
+                    sequence_path=source_path,
+                    sequence_id="BenignTraffic:chunk-000000",
+                    coarse_label="Benign",
+                    fine_label="Benign",
+                    split="train",
+                    chunk_index=0,
+                ),
+                ManifestRow(
+                    sequence_path=source_path,
+                    sequence_id="BenignTraffic:chunk-000001",
+                    coarse_label="Benign",
+                    fine_label="Benign",
+                    split="val",
+                    chunk_index=1,
+                ),
+            ]
+
+            output_rows, stats = rechunk_manifest_rows(
+                rows,
+                output_root=root / "data" / "sequences_windowed",
+                project_root=root,
+                max_events=1,
+            )
+
+            self.assertEqual(stats["input_events"], 3)
+            self.assertEqual(stats["output_events"], 3)
+            self.assertEqual(stats["output_chunks"], 3)
+            self.assertEqual(
+                [row.split for row in output_rows],
+                ["train", "train", "val"],
+            )
+            output_path = output_rows[0].sequence_path
+            payloads = [
+                json.loads(line)
+                for line in output_path.read_text(encoding="utf-8").splitlines()
+            ]
+            self.assertEqual([len(payload["events"]) for payload in payloads], [1, 1, 1])
+            self.assertEqual(
+                [payload["source_chunk_index"] for payload in payloads],
+                [0, 0, 1],
+            )
+            self.assertEqual(
+                [(payload["event_start"], payload["event_stop"]) for payload in payloads],
+                [(0, 1), (1, 2), (0, 1)],
+            )
+
     def test_manifest_and_vocab_are_built_from_sequence_files(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)

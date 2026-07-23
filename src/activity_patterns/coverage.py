@@ -28,6 +28,7 @@ FINE_LABEL_TO_FOLDER: dict[str, str] = {
     "DDoS-TCP flood": "DDoS-TCP_Flood",
     "DDoS-SYN flood": "DDoS-SYN_Flood",
     "DDoS-SynonymousIP flood": "DDoS-SynonymousIP_Flood",
+    "DDoS-ICMP fragmentation": "DDoS-ICMP_Fragmentation",
     "DoS-TCP flood": "DoS-TCP_Flood",
     "DoS-HTTP flood": "DoS-HTTP_Flood",
     "DoS-SYN flood": "DoS-SYN_Flood",

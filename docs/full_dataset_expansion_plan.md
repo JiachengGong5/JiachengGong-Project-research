@@ -1,5 +1,11 @@
 # Full CICIoT2023 Expansion Plan
 
+> Status update, July 20, 2026: this expansion has been completed. The local
+> pipeline now contains all 33 official attacks plus Benign (34 output labels),
+> including DDoS-ICMP Fragmentation. The coverage lists and commands below are
+> retained as a historical record of the expansion process; current results are
+> documented in `docs/progress_report.md` and `docs/professor_demo_guide.md`.
+
 The current local data validates the end-to-end pipeline and covers most
 coarse categories, but it is not yet the full CICIoT2023 fine-label set.
 

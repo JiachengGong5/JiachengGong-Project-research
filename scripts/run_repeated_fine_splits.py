@@ -29,6 +29,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-events", type=int, default=128)
     parser.add_argument("--embedding-dim", type=int, default=32)
     parser.add_argument("--hidden-dim", type=int, default=64)
+    parser.add_argument("--coarse-loss-weight", type=float, default=1.0)
+    parser.add_argument("--fine-loss-weight", type=float, default=1.0)
+    parser.add_argument(
+        "--fine-loss-reduction",
+        choices=("sample_mean", "category_sum"),
+        default="sample_mean",
+    )
     parser.add_argument("--class-weighting", choices=("balanced", "none"), default="balanced")
     parser.add_argument(
         "--fine-class-weighting",
@@ -396,6 +403,12 @@ def run_seed(seed: int, args: argparse.Namespace) -> dict[str, Any]:
             args.class_weighting,
             "--fine-class-weighting",
             args.fine_class_weighting,
+            "--coarse-loss-weight",
+            str(args.coarse_loss_weight),
+            "--fine-loss-weight",
+            str(args.fine_loss_weight),
+            "--fine-loss-reduction",
+            args.fine_loss_reduction,
             "--seed",
             str(seed),
             "--output-dir",
