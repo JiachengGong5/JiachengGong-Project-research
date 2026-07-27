@@ -18,14 +18,13 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 import torch  # noqa: E402
 
 from activity_patterns.dataset import SequenceChunkDataset  # noqa: E402
-from activity_patterns.labels import (  # noqa: E402
-    CATEGORY_NAMES,
-    CATEGORY_TO_NUM_FINE,
-    FINE_LABEL_NAMES,
-    fine_label_from_category_index,
-)
+from activity_patterns.labels import CICIOT2023_SCHEMA  # noqa: E402
 from activity_patterns.manifest import read_manifest  # noqa: E402
 from activity_patterns.model import HierarchicalProtocolEventLSTM  # noqa: E402
+from activity_patterns.schema import (  # noqa: E402
+    LabelSchema,
+    label_schema_from_checkpoint,
+)
 from activity_patterns.trace import (  # noqa: E402
     reconstruct_activity_trace,
     resolve_zeek_log_dir,
@@ -54,6 +53,23 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-trace-records", type=int, default=30)
     parser.add_argument("--output-dir", default="artifacts/activity_patterns_dev")
     parser.add_argument(
+        "--label-schema",
+        help=(
+            "Optional JSON label schema. By default, use the schema stored in "
+            "the checkpoint, then fall back to CICIoT2023."
+        ),
+    )
+    parser.add_argument(
+        "--zeek-root",
+        default="data/zeek",
+        help="Root containing LABEL/CAPTURE Zeek log directories",
+    )
+    parser.add_argument(
+        "--zeek-sample-root",
+        default="data/zeek_sample",
+        help="Equivalent Zeek root for .sample.jsonl sequences",
+    )
+    parser.add_argument(
         "--include-incorrect",
         action="store_true",
         help="Include incorrectly predicted samples when correct examples are scarce.",
@@ -62,6 +78,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def choose_device() -> torch.device:
+    if torch.cuda.is_available():
+        return torch.device("cuda")
     if torch.backends.mps.is_available():
         return torch.device("mps")
     return torch.device("cpu")
@@ -75,15 +93,15 @@ def torch_load(path: str | Path, device: torch.device) -> dict[str, Any]:
 
 
 def load_model(
-    checkpoint_path: str | Path,
+    checkpoint: dict[str, Any],
     vocab_size: int,
     device: torch.device,
+    label_schema: LabelSchema = CICIOT2023_SCHEMA,
 ) -> HierarchicalProtocolEventLSTM:
-    checkpoint = torch_load(checkpoint_path, device)
     checkpoint_args = checkpoint.get("args", {})
     model = HierarchicalProtocolEventLSTM(
         vocab_size,
-        CATEGORY_TO_NUM_FINE,
+        label_schema.category_to_num_fine,
         embedding_dim=int(checkpoint_args.get("embedding_dim", 32)),
         hidden_dim=int(checkpoint_args.get("hidden_dim", 64)),
         num_layers=int(checkpoint_args.get("num_layers", 1)),
@@ -92,6 +110,18 @@ def load_model(
     model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()
     return model
+
+
+def resolve_label_schema(
+    checkpoint: dict[str, Any],
+    explicit_path: str | Path | None = None,
+) -> LabelSchema:
+    if explicit_path is not None:
+        return LabelSchema.load(explicit_path)
+    return label_schema_from_checkpoint(
+        checkpoint,
+        fallback=CICIOT2023_SCHEMA,
+    )
 
 
 def read_payload(dataset: SequenceChunkDataset, index: int) -> dict[str, Any]:
@@ -136,6 +166,7 @@ def hierarchical_prediction(
     model: HierarchicalProtocolEventLSTM,
     token_ids: list[list[int]],
     device: torch.device,
+    label_schema: LabelSchema = CICIOT2023_SCHEMA,
 ) -> dict[str, Any]:
     tensor, lengths = tensor_from_token_ids(token_ids, device=device)
     outputs = model(tensor, lengths)
@@ -148,7 +179,7 @@ def hierarchical_prediction(
 
     coarse_probabilities = torch.softmax(coarse_logits[0], dim=0)
     coarse_index = int(torch.argmax(coarse_probabilities).detach().cpu())
-    coarse_label = CATEGORY_NAMES[coarse_index]
+    coarse_label = label_schema.category_names[coarse_index]
     coarse_confidence = float(coarse_probabilities[coarse_index].detach().cpu())
 
     fine_logits = fine_logits_by_category[coarse_label]
@@ -157,7 +188,10 @@ def hierarchical_prediction(
     fine_probabilities = torch.softmax(fine_logits[0], dim=0)
     fine_index = int(torch.argmax(fine_probabilities).detach().cpu())
     fine_confidence = float(fine_probabilities[fine_index].detach().cpu())
-    fine_label = fine_label_from_category_index(coarse_label, fine_index)
+    fine_label = label_schema.fine_label_from_category_index(
+        coarse_label,
+        fine_index,
+    )
 
     return {
         "coarse_index": coarse_index,
@@ -180,6 +214,7 @@ def target_probability(
     target_coarse_index: int,
     device: torch.device,
     target_fine_index: int | None = None,
+    label_schema: LabelSchema = CICIOT2023_SCHEMA,
 ) -> float:
     tensor, lengths = tensor_from_token_ids(token_ids, device=device)
     outputs = model(tensor, lengths)
@@ -194,7 +229,7 @@ def target_probability(
 
     if not isinstance(fine_logits_by_category, Mapping):
         raise TypeError("outputs['fine'] must be a mapping")
-    category = CATEGORY_NAMES[target_coarse_index]
+    category = label_schema.category_names[target_coarse_index]
     fine_logits = fine_logits_by_category[category]
     if not isinstance(fine_logits, torch.Tensor):
         raise TypeError(f"outputs['fine'][{category!r}] must be a tensor")
@@ -213,6 +248,7 @@ def occlusion_search(
     window: int,
     stride: int,
     device: torch.device,
+    label_schema: LabelSchema = CICIOT2023_SCHEMA,
 ) -> dict[str, Any]:
     if window < 1 or stride < 1:
         raise ValueError("window and stride must be positive")
@@ -223,6 +259,7 @@ def occlusion_search(
         target_coarse_index,
         device,
         target_fine_index=target_fine_index,
+        label_schema=label_schema,
     )
     best = {
         "start": 0,
@@ -242,6 +279,7 @@ def occlusion_search(
             target_coarse_index,
             device,
             target_fine_index=target_fine_index,
+            label_schema=label_schema,
         )
         drop = baseline - probability
         if drop > best["probability_drop"]:
@@ -275,11 +313,16 @@ def select_sample_indices(
     max_samples_per_class: int,
     include_incorrect: bool,
     group_by: str,
+    label_schema: LabelSchema = CICIOT2023_SCHEMA,
 ) -> list[tuple[int, int, int | None, float]]:
     candidates_by_class: dict[str, list[tuple[int, int, int | None, float]]] = (
         defaultdict(list)
     )
-    class_order = FINE_LABEL_NAMES if group_by == "fine" else CATEGORY_NAMES
+    class_order = (
+        label_schema.fine_label_names
+        if group_by == "fine"
+        else label_schema.category_names
+    )
 
     for index in range(len(dataset)):
         item = dataset[index]
@@ -291,6 +334,7 @@ def select_sample_indices(
             model,
             encode_events(events, vocab),
             device,
+            label_schema,
         )
 
         if group_by == "fine":
@@ -338,6 +382,7 @@ def build_pattern_record(
     target_confidence: float,
     args: argparse.Namespace,
     device: torch.device,
+    label_schema: LabelSchema = CICIOT2023_SCHEMA,
 ) -> dict[str, Any]:
     item = dataset[dataset_index]
     row = dataset.rows[dataset.refs[dataset_index].row_index]
@@ -354,11 +399,17 @@ def build_pattern_record(
         window=args.occlusion_window,
         stride=args.stride,
         device=device,
+        label_schema=label_schema,
     )
     span_events = events[occlusion["start"] : occlusion["end"]]
     start_ts = float(span_events[0]["timestamp"])
     end_ts = float(span_events[-1]["timestamp"])
-    log_dir = resolve_zeek_log_dir(row.sequence_path, project_root=PROJECT_ROOT)
+    log_dir = resolve_zeek_log_dir(
+        row.sequence_path,
+        project_root=PROJECT_ROOT,
+        zeek_root=args.zeek_root,
+        zeek_sample_root=args.zeek_sample_root,
+    )
     trace_records = reconstruct_activity_trace(
         log_dir,
         start_ts=start_ts,
@@ -368,7 +419,12 @@ def build_pattern_record(
         max_records=args.max_trace_records,
     )
 
-    prediction = hierarchical_prediction(model, token_ids, device)
+    prediction = hierarchical_prediction(
+        model,
+        token_ids,
+        device,
+        label_schema,
+    )
 
     return {
         "sequence_path": row.sequence_path.as_posix(),
@@ -446,6 +502,8 @@ def write_markdown(path: Path, records: list[dict[str, Any]]) -> None:
 def main() -> None:
     args = build_parser().parse_args()
     device = choose_device()
+    checkpoint = torch_load(args.checkpoint, device)
+    label_schema = resolve_label_schema(checkpoint, args.label_schema)
     rows = read_manifest(args.manifest, project_root=PROJECT_ROOT)
     vocab = TokenVocab.load(args.vocab)
     dataset = SequenceChunkDataset(
@@ -453,11 +511,12 @@ def main() -> None:
         vocab,
         split=args.split,
         max_events=args.max_events,
+        label_schema=label_schema,
     )
     if len(dataset) == 0:
         raise ValueError(f"No chunks found for split {args.split!r}")
 
-    model = load_model(args.checkpoint, len(vocab), device)
+    model = load_model(checkpoint, len(vocab), device, label_schema)
     selected = select_sample_indices(
         model,
         dataset,
@@ -467,6 +526,7 @@ def main() -> None:
         max_samples_per_class=args.max_samples_per_class,
         include_incorrect=args.include_incorrect,
         group_by=args.group_by,
+        label_schema=label_schema,
     )
     records = [
         build_pattern_record(
@@ -479,6 +539,7 @@ def main() -> None:
             target_confidence=confidence,
             args=args,
             device=device,
+            label_schema=label_schema,
         )
         for index, target_coarse_index, target_fine_index, confidence in selected
     ]
@@ -492,6 +553,7 @@ def main() -> None:
     write_markdown(output_dir / "patterns.md", records)
 
     print(f"selected_examples={len(records)}")
+    print(f"label_schema={label_schema.name}")
     print(f"output_jsonl={jsonl_path}")
     print(f"output_markdown={output_dir / 'patterns.md'}")
 

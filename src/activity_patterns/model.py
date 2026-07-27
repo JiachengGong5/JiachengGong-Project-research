@@ -124,9 +124,20 @@ class HierarchicalProtocolEventLSTM(nn.Module):
             nn.Dropout(dropout),
             nn.Linear(self.encoder.output_dim, len(self.category_names)),
         )
+        module_dict_attributes = set(dir(nn.ModuleDict()))
+        self._fine_classifier_keys = {}
+        for index, category in enumerate(self.category_names):
+            key_is_safe = (
+                bool(category)
+                and "." not in category
+                and category not in module_dict_attributes
+            )
+            self._fine_classifier_keys[category] = (
+                category if key_is_safe else f"category_{index}"
+            )
         self.fine_classifiers = nn.ModuleDict(
             {
-                category: nn.Sequential(
+                self._fine_classifier_keys[category]: nn.Sequential(
                     nn.Dropout(dropout),
                     nn.Linear(self.encoder.output_dim, num_fine),
                 )
@@ -139,8 +150,10 @@ class HierarchicalProtocolEventLSTM(nn.Module):
         return {
             "coarse": self.coarse_classifier(sequence_embedding),
             "fine": {
-                category: classifier(sequence_embedding)
-                for category, classifier in self.fine_classifiers.items()
+                category: self.fine_classifiers[
+                    self._fine_classifier_keys[category]
+                ](sequence_embedding)
+                for category in self.category_names
             },
         }
 

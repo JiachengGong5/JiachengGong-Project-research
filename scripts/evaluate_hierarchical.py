@@ -21,15 +21,13 @@ from activity_patterns.dataset import (  # noqa: E402
     SequenceChunkDataset,
     collate_sequence_chunks,
 )
-from activity_patterns.labels import (  # noqa: E402
-    CATEGORY_NAMES,
-    CATEGORY_TO_NUM_FINE,
-    FINE_LABEL_NAMES,
-    FINE_LABEL_TO_CATEGORY,
-    fine_label_from_category_index,
-)
+from activity_patterns.labels import CICIOT2023_SCHEMA  # noqa: E402
 from activity_patterns.manifest import read_manifest  # noqa: E402
 from activity_patterns.model import HierarchicalProtocolEventLSTM  # noqa: E402
+from activity_patterns.schema import (  # noqa: E402
+    LabelSchema,
+    label_schema_from_checkpoint,
+)
 from activity_patterns.vocab import TokenVocab  # noqa: E402
 
 
@@ -42,10 +40,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-events", type=int, default=128)
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--output-dir", default="artifacts/evaluation_dev")
+    parser.add_argument(
+        "--label-schema",
+        help=(
+            "Optional JSON label schema. By default, use the schema stored in "
+            "the checkpoint, then fall back to CICIoT2023."
+        ),
+    )
     return parser
 
 
 def choose_device() -> torch.device:
+    if torch.cuda.is_available():
+        return torch.device("cuda")
     if torch.backends.mps.is_available():
         return torch.device("mps")
     return torch.device("cpu")
@@ -59,15 +66,15 @@ def torch_load(path: str | Path, device: torch.device) -> dict[str, Any]:
 
 
 def load_model(
-    checkpoint_path: str | Path,
+    checkpoint: dict[str, Any],
     vocab_size: int,
     device: torch.device,
+    label_schema: LabelSchema = CICIOT2023_SCHEMA,
 ) -> HierarchicalProtocolEventLSTM:
-    checkpoint = torch_load(checkpoint_path, device)
     checkpoint_args = checkpoint.get("args", {})
     model = HierarchicalProtocolEventLSTM(
         vocab_size,
-        CATEGORY_TO_NUM_FINE,
+        label_schema.category_to_num_fine,
         embedding_dim=int(checkpoint_args.get("embedding_dim", 32)),
         hidden_dim=int(checkpoint_args.get("hidden_dim", 64)),
         num_layers=int(checkpoint_args.get("num_layers", 1)),
@@ -76,6 +83,18 @@ def load_model(
     model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()
     return model
+
+
+def resolve_label_schema(
+    checkpoint: dict[str, Any],
+    explicit_path: str | Path | None = None,
+) -> LabelSchema:
+    if explicit_path is not None:
+        return LabelSchema.load(explicit_path)
+    return label_schema_from_checkpoint(
+        checkpoint,
+        fallback=CICIOT2023_SCHEMA,
+    )
 
 
 def move_batch(batch: dict[str, object], device: torch.device) -> dict[str, object]:
@@ -91,8 +110,9 @@ def move_batch(batch: dict[str, object], device: torch.device) -> dict[str, obje
 def fine_prediction(
     outputs: dict[str, object],
     coarse_prediction: int,
+    label_schema: LabelSchema = CICIOT2023_SCHEMA,
 ) -> tuple[str, int]:
-    category = CATEGORY_NAMES[coarse_prediction]
+    category = label_schema.category_names[coarse_prediction]
     fine_logits_by_category = outputs["fine"]
     if not isinstance(fine_logits_by_category, dict):
         raise TypeError("outputs['fine'] must be a dict")
@@ -105,6 +125,7 @@ def fine_prediction(
 def category_fine_prediction(
     outputs: dict[str, object],
     category: str,
+    label_schema: LabelSchema = CICIOT2023_SCHEMA,
 ) -> tuple[int, str]:
     fine_logits_by_category = outputs["fine"]
     if not isinstance(fine_logits_by_category, dict):
@@ -113,7 +134,7 @@ def category_fine_prediction(
     if not isinstance(logits, torch.Tensor):
         raise TypeError(f"outputs['fine'][{category!r}] must be a tensor")
     index = int(torch.argmax(logits[0]).detach().cpu())
-    return index, fine_label_from_category_index(category, index)
+    return index, label_schema.fine_label_from_category_index(category, index)
 
 
 def build_confusion_matrix(
@@ -177,7 +198,12 @@ def evaluate_dataset(
     device: torch.device,
     *,
     batch_size: int = 64,
+    label_schema: LabelSchema | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    if label_schema is None:
+        label_schema = dataset.label_schema
+    category_names = label_schema.category_names
+    fine_label_names = label_schema.fine_label_names
     predictions = []
     coarse_targets = []
     coarse_predicted = []
@@ -210,14 +236,14 @@ def evaluate_dataset(
             row = dataset.rows[dataset.refs[dataset_index].row_index]
             pred_index = int(pred_indices[local_index].detach().cpu())
             true_index = int(batch["coarse_targets"][local_index].detach().cpu())
-            pred_category = CATEGORY_NAMES[pred_index]
+            pred_category = category_names[pred_index]
             pred_fine_logits = fine_logits_by_category[pred_category]
             if not isinstance(pred_fine_logits, torch.Tensor):
                 raise TypeError(f"outputs['fine'][{pred_category!r}] must be a tensor")
             pred_fine_index = int(
                 torch.argmax(pred_fine_logits[local_index]).detach().cpu()
             )
-            pred_fine_label = fine_label_from_category_index(
+            pred_fine_label = label_schema.fine_label_from_category_index(
                 pred_category, pred_fine_index
             )
             true_category = raw_batch["coarse_labels"][local_index]
@@ -228,11 +254,11 @@ def evaluate_dataset(
             true_category_fine_index = int(
                 torch.argmax(true_category_logits[local_index]).detach().cpu()
             )
-            true_category_fine_label = fine_label_from_category_index(
+            true_category_fine_label = label_schema.fine_label_from_category_index(
                 true_category, true_category_fine_index
             )
-            fine_target_index = FINE_LABEL_NAMES.index(true_fine_label)
-            fine_pred_index = FINE_LABEL_NAMES.index(true_category_fine_label)
+            fine_target_index = fine_label_names.index(true_fine_label)
+            fine_pred_index = fine_label_names.index(true_category_fine_label)
             coarse_correct = pred_index == true_index
             fine_correct_given_true_category = (
                 true_category_fine_label == true_fine_label
@@ -272,22 +298,32 @@ def evaluate_dataset(
     coarse_confusion = build_confusion_matrix(
         coarse_targets,
         coarse_predicted,
-        len(CATEGORY_NAMES),
+        len(category_names),
     )
     fine_confusion = build_confusion_matrix(
         fine_targets,
         fine_predicted_for_true_category,
-        len(FINE_LABEL_NAMES),
+        len(fine_label_names),
     )
     metrics = {
-        "coarse": aggregate_metrics(coarse_confusion, CATEGORY_NAMES),
-        "fine_given_true_category": aggregate_metrics(fine_confusion, FINE_LABEL_NAMES),
+        "coarse": aggregate_metrics(coarse_confusion, category_names),
+        "fine_given_true_category": aggregate_metrics(
+            fine_confusion,
+            fine_label_names,
+        ),
         "path_accuracy": path_correct / max(len(dataset), 1),
     }
     metrics["coarse_confusion_matrix"] = coarse_confusion
     metrics["fine_confusion_matrix"] = fine_confusion
-    metrics["coarse_per_class"] = per_class_metrics(coarse_confusion, CATEGORY_NAMES)
-    metrics["fine_per_class"] = per_class_metrics(fine_confusion, FINE_LABEL_NAMES)
+    metrics["coarse_per_class"] = per_class_metrics(
+        coarse_confusion,
+        category_names,
+    )
+    metrics["fine_per_class"] = per_class_metrics(
+        fine_confusion,
+        fine_label_names,
+    )
+    metrics["label_schema"] = label_schema.to_json()
     metrics["total_samples"] = len(dataset)
     return predictions, metrics
 
@@ -324,6 +360,8 @@ def write_confusion_csv(
 def main() -> None:
     args = build_parser().parse_args()
     device = choose_device()
+    checkpoint = torch_load(args.checkpoint, device)
+    label_schema = resolve_label_schema(checkpoint, args.label_schema)
     rows = read_manifest(args.manifest, project_root=PROJECT_ROOT)
     vocab = TokenVocab.load(args.vocab)
     dataset = SequenceChunkDataset(
@@ -331,16 +369,18 @@ def main() -> None:
         vocab,
         split=args.split,
         max_events=args.max_events,
+        label_schema=label_schema,
     )
     if len(dataset) == 0:
         raise ValueError(f"No chunks found for split {args.split!r}")
 
-    model = load_model(args.checkpoint, len(vocab), device)
+    model = load_model(checkpoint, len(vocab), device, label_schema)
     predictions, metrics = evaluate_dataset(
         model,
         dataset,
         device,
         batch_size=args.batch_size,
+        label_schema=label_schema,
     )
 
     output_dir = Path(args.output_dir)
@@ -364,12 +404,12 @@ def main() -> None:
     write_confusion_csv(
         output_dir / "coarse_confusion_matrix.csv",
         metrics["coarse_confusion_matrix"],
-        CATEGORY_NAMES,
+        label_schema.category_names,
     )
     write_confusion_csv(
         output_dir / "fine_confusion_matrix.csv",
         metrics["fine_confusion_matrix"],
-        FINE_LABEL_NAMES,
+        label_schema.fine_label_names,
     )
 
     print(f"evaluated_samples={len(dataset)}")
@@ -381,6 +421,7 @@ def main() -> None:
         f"{metrics['fine_given_true_category']['macro_f1']:.3f}"
     )
     print(f"path_accuracy={metrics['path_accuracy']:.3f}")
+    print(f"label_schema={label_schema.name}")
     print(f"output_dir={output_dir}")
 
 

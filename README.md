@@ -117,6 +117,35 @@ chunks. It does not calculate window statistics or create overlapping rolling
 features. The development workflow below assigns parent chunks to a split and
 then ensures that every smaller child segment inherits that parent split.
 
+## Portable One-Command PCAP Workflow
+
+For another dataset organized as `DATASET/<class>/*.pcap`, the complete
+PCAP-to-model workflow can be run with one command:
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/run_dataset_workflow.py \
+  --input-root /path/to/another-pcap-dataset \
+  --dataset-name another-dataset \
+  --epochs 10 \
+  --extract-patterns
+```
+
+Without a schema, class folder names are inferred automatically as flat output
+classes. For a coarse/fine hierarchy, pass a JSON schema:
+
+```bash
+... --label-schema configs/datasets/example_hierarchical.json
+```
+
+The command generates Zeek logs, chronological event sequences, capture-aware
+train/validation splits, non-overlapping segments, a train-only vocabulary,
+the hierarchical LSTM checkpoint, evaluation tables, and optional Occlusion
+plus Trace outputs. All products and stage logs are stored under
+`workflow_runs/<dataset-name>/`.
+
+See [docs/portable_dataset_workflow.md](docs/portable_dataset_workflow.md) for
+the input contract, schema format, output tree, and split policy.
+
 ## Phase 2 Smoke Data
 
 After a few PCAP files have been converted into sequence JSONL files, build a

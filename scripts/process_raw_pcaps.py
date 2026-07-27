@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Batch process local CICIoT2023 PCAP files into sequence JSONL files."""
+"""Batch process labeled PCAP folders into protocol-event sequence JSONL."""
 
 from __future__ import annotations
 
@@ -14,8 +14,9 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from activity_patterns.events import FIELDS_BY_LOG  # noqa: E402
-from activity_patterns.labels import canonical_fine_label  # noqa: E402
+from activity_patterns.labels import CICIOT2023_SCHEMA  # noqa: E402
 from activity_patterns.prepare import write_sequences  # noqa: E402
+from activity_patterns.schema import LabelSchema  # noqa: E402
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -40,11 +41,21 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--force-zeek", action="store_true")
     parser.add_argument("--force-sequences", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--label-schema",
+        help=(
+            "Optional JSON label schema. Without it, CICIoT2023 labels are used."
+        ),
+    )
     return parser
 
 
 def discover_pcaps(raw_root: Path, only: set[str]) -> list[Path]:
-    pcaps = sorted(raw_root.glob("*/*.pcap"))
+    pcaps = sorted(
+        path
+        for path in raw_root.rglob("*")
+        if path.is_file() and path.suffix.lower() in {".pcap", ".pcapng"}
+    )
     if only:
         pcaps = [path for path in pcaps if path.parent.name in only]
     return pcaps
@@ -117,6 +128,7 @@ def process_sequences(
     raw_label: str,
     sequence_id: str,
     max_events: int,
+    label_schema: LabelSchema,
     force: bool,
     dry_run: bool,
 ) -> None:
@@ -128,11 +140,11 @@ def process_sequences(
     if dry_run:
         return
 
-    canonical_fine_label(raw_label)  # Validate folder naming before writing.
+    fine_label = label_schema.canonical_fine_label(raw_label)
     write_sequences(
         log_dir,
         sequence_path,
-        label=raw_label,
+        label=fine_label,
         sequence_id=sequence_id,
         max_events=max_events,
     )
@@ -144,6 +156,11 @@ def main() -> None:
     zeek_root = Path(args.zeek_root)
     sequence_root = Path(args.sequence_root)
     sample_root = Path(args.zeek_sample_root)
+    label_schema = (
+        LabelSchema.load(args.label_schema)
+        if args.label_schema
+        else CICIOT2023_SCHEMA
+    )
     only = set(args.only)
 
     pcaps = discover_pcaps(raw_root, only)
@@ -170,6 +187,7 @@ def main() -> None:
             raw_label=raw_label,
             sequence_id=f"{stem}-sample" if args.sample_conn_lines else stem,
             max_events=args.max_events,
+            label_schema=label_schema,
             force=args.force_sequences,
             dry_run=args.dry_run,
         )

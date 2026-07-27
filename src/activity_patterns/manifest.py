@@ -8,7 +8,8 @@ import json
 from pathlib import Path
 from typing import Iterable
 
-from .labels import canonical_fine_label, coarse_label_for_fine
+from .labels import CICIOT2023_SCHEMA
+from .schema import LabelSchema
 
 
 MANIFEST_FIELDS = (
@@ -48,13 +49,14 @@ def infer_manifest_row(
     *,
     root: str | Path = ".",
     split: str = "train",
+    label_schema: LabelSchema = CICIOT2023_SCHEMA,
 ) -> ManifestRow:
     """Infer labels from a generated sequence JSONL path."""
 
     path = Path(sequence_path)
     label_source = path.parent.name
-    fine_label = canonical_fine_label(label_source)
-    coarse_label = coarse_label_for_fine(fine_label)
+    fine_label = label_schema.canonical_fine_label(label_source)
+    coarse_label = label_schema.coarse_label_for_fine(fine_label)
     try:
         relative_path = path.relative_to(root)
     except ValueError:
@@ -73,10 +75,16 @@ def build_manifest_rows(
     *,
     project_root: str | Path = ".",
     split: str = "train",
+    label_schema: LabelSchema = CICIOT2023_SCHEMA,
 ) -> list[ManifestRow]:
     root = Path(sequence_root)
     return [
-        infer_manifest_row(path, root=project_root, split=split)
+        infer_manifest_row(
+            path,
+            root=project_root,
+            split=split,
+            label_schema=label_schema,
+        )
         for path in sorted(root.rglob("*.jsonl"))
     ]
 

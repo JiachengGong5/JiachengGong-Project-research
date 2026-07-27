@@ -1,0 +1,23 @@
+{
+  "name": "example-iot-dataset",
+  "category_to_fine_labels": {
+    "Benign": [
+      "Benign"
+    ],
+    "Flood": [
+      "SYN Flood",
+      "UDP Flood"
+    ],
+    "Recon": [
+      "Port Scan",
+      "Host Discovery"
+    ]
+  },
+  "aliases": {
+    "Normal": "Benign",
+    "syn_flood": "SYN Flood",
+    "udp_flood": "UDP Flood",
+    "port_scan": "Port Scan",
+    "host_discovery": "Host Discovery"
+  }
+}

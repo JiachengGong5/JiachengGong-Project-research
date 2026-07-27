@@ -7,8 +7,9 @@ import json
 from pathlib import Path
 from typing import Any
 
-from .labels import CATEGORY_NAMES, category_index, fine_index_within_category
+from .labels import CICIOT2023_SCHEMA
 from .manifest import ManifestRow, read_manifest
+from .schema import LabelSchema
 from .vocab import TokenVocab
 
 try:
@@ -38,10 +39,12 @@ class SequenceChunkDataset(Dataset[dict[str, Any]]):
         *,
         split: str | None = None,
         max_events: int | None = None,
+        label_schema: LabelSchema = CICIOT2023_SCHEMA,
     ) -> None:
         self.rows = [row for row in rows if split is None or row.split == split]
         self.vocab = vocab
         self.max_events = max_events
+        self.label_schema = label_schema
         self.refs = self._build_refs()
 
     @classmethod
@@ -53,12 +56,14 @@ class SequenceChunkDataset(Dataset[dict[str, Any]]):
         project_root: str | Path = ".",
         split: str | None = None,
         max_events: int | None = None,
+        label_schema: LabelSchema = CICIOT2023_SCHEMA,
     ) -> "SequenceChunkDataset":
         return cls(
             read_manifest(manifest_path, project_root=project_root),
             vocab,
             split=split,
             max_events=max_events,
+            label_schema=label_schema,
         )
 
     def _build_refs(self) -> list[ChunkRef]:
@@ -138,8 +143,11 @@ class SequenceChunkDataset(Dataset[dict[str, Any]]):
             "event_stop": event_start + len(events),
             "coarse_label": row.coarse_label,
             "fine_label": row.fine_label,
-            "coarse_target": category_index(row.coarse_label),
-            "fine_target": fine_index_within_category(row.fine_label),
+            "coarse_target": self.label_schema.category_index(row.coarse_label),
+            "fine_target": self.label_schema.fine_index_within_category(
+                row.fine_label
+            ),
+            "category_names": self.label_schema.category_names,
         }
 
 
@@ -168,6 +176,10 @@ def collate_sequence_chunks(batch: list[dict[str, Any]]) -> dict[str, Any]:
                 dtype=torch.long,
             )
 
+    category_names = tuple(batch[0]["category_names"])
+    if any(tuple(item["category_names"]) != category_names for item in batch):
+        raise ValueError("All samples in a batch must use the same label schema")
+
     return {
         "token_ids": token_ids,
         "lengths": lengths,
@@ -180,5 +192,5 @@ def collate_sequence_chunks(batch: list[dict[str, Any]]) -> dict[str, Any]:
         "source_chunk_indices": [item["source_chunk_index"] for item in batch],
         "event_starts": [item["event_start"] for item in batch],
         "event_stops": [item["event_stop"] for item in batch],
-        "category_names": CATEGORY_NAMES,
+        "category_names": category_names,
     }

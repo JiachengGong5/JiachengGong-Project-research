@@ -15,3 +15,4 @@ data/sequences_windowed/
 artifacts/
 checkpoints/
 runs/
+workflow_runs/

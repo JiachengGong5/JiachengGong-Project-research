@@ -24,19 +24,14 @@ from activity_patterns.dataset import (  # noqa: E402
     SequenceChunkDataset,
     collate_sequence_chunks,
 )
-from activity_patterns.labels import (  # noqa: E402
-    CATEGORY_NAMES,
-    CATEGORY_TO_FINE_LABELS,
-    CATEGORY_TO_NUM_FINE,
-    category_index,
-    fine_index_within_category,
-)
+from activity_patterns.labels import CICIOT2023_SCHEMA  # noqa: E402
 from activity_patterns.manifest import read_manifest  # noqa: E402
 from activity_patterns.model import (  # noqa: E402
     HierarchicalProtocolEventLSTM,
     hierarchical_loss,
 )
 from activity_patterns.vocab import TokenVocab  # noqa: E402
+from activity_patterns.schema import LabelSchema  # noqa: E402
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -44,6 +39,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--manifest", default="manifests/dev_chunk_manifest.csv")
     parser.add_argument("--vocab", default="artifacts/dev_vocab.json")
     parser.add_argument("--output-dir", default="runs/hierarchical_dev")
+    parser.add_argument(
+        "--label-schema",
+        help=(
+            "Optional JSON label schema. Without it, CICIoT2023 labels are used."
+        ),
+    )
     parser.add_argument("--train-split", default="train")
     parser.add_argument("--val-split", default="val")
     parser.add_argument("--epochs", type=int, default=10)
@@ -92,6 +93,8 @@ def set_seed(seed: int) -> None:
 
 
 def choose_device() -> torch.device:
+    if torch.cuda.is_available():
+        return torch.device("cuda")
     if torch.backends.mps.is_available():
         return torch.device("mps")
     return torch.device("cpu")
@@ -107,22 +110,29 @@ def move_batch(batch: dict[str, object], device: torch.device) -> dict[str, obje
     return moved
 
 
-def coarse_counts(dataset: SequenceChunkDataset) -> list[int]:
-    counts = [0 for _ in CATEGORY_NAMES]
+def coarse_counts(
+    dataset: SequenceChunkDataset,
+    label_schema: LabelSchema = CICIOT2023_SCHEMA,
+) -> list[int]:
+    counts = [0 for _ in label_schema.category_names]
     for ref in dataset.refs:
         row = dataset.rows[ref.row_index]
-        counts[category_index(row.coarse_label)] += 1
+        counts[label_schema.category_index(row.coarse_label)] += 1
     return counts
 
 
-def fine_counts_by_category(dataset: SequenceChunkDataset) -> dict[str, list[int]]:
+def fine_counts_by_category(
+    dataset: SequenceChunkDataset,
+    label_schema: LabelSchema = CICIOT2023_SCHEMA,
+) -> dict[str, list[int]]:
     counts = {
         category: [0 for _ in fine_labels]
-        for category, fine_labels in CATEGORY_TO_FINE_LABELS.items()
+        for category, fine_labels in label_schema.category_to_fine_labels.items()
     }
     for ref in dataset.refs:
         row = dataset.rows[ref.row_index]
-        counts[row.coarse_label][fine_index_within_category(row.fine_label)] += 1
+        fine_index = label_schema.fine_index_within_category(row.fine_label)
+        counts[row.coarse_label][fine_index] += 1
     return counts
 
 
@@ -146,7 +156,11 @@ def balanced_fine_weights_by_category(
     device: torch.device,
 ) -> dict[str, torch.Tensor]:
     return {
-        category: balanced_weights(counts, device)
+        category: (
+            balanced_weights(counts, device)
+            if any(counts)
+            else torch.zeros(len(counts), dtype=torch.float32, device=device)
+        )
         for category, counts in counts_by_category.items()
     }
 
@@ -154,13 +168,16 @@ def balanced_fine_weights_by_category(
 def predicted_fine_indices(
     outputs: dict[str, object],
     coarse_predictions: torch.Tensor,
+    category_names: tuple[str, ...] | None = None,
 ) -> torch.Tensor:
     fine_logits_by_category = outputs["fine"]
     if not isinstance(fine_logits_by_category, dict):
         raise TypeError("outputs['fine'] must be a dict")
 
     predictions = torch.zeros_like(coarse_predictions)
-    for category_index_value, category in enumerate(CATEGORY_NAMES):
+    if category_names is None:
+        category_names = CICIOT2023_SCHEMA.category_names
+    for category_index_value, category in enumerate(category_names):
         mask = coarse_predictions == category_index_value
         if torch.any(mask):
             logits = fine_logits_by_category[category]
@@ -205,9 +222,14 @@ def macro_metrics(confusion: list[list[int]]) -> dict[str, float]:
     }
 
 
-def per_class_metrics(confusion: list[list[int]]) -> list[dict[str, float | str | int]]:
+def per_class_metrics(
+    confusion: list[list[int]],
+    labels: tuple[str, ...] | None = None,
+) -> list[dict[str, float | str | int]]:
+    if labels is None:
+        labels = CICIOT2023_SCHEMA.category_names
     rows: list[dict[str, float | str | int]] = []
-    for index, label in enumerate(CATEGORY_NAMES):
+    for index, label in enumerate(labels):
         true_positive = confusion[index][index]
         support = sum(confusion[index])
         predicted = sum(confusion[row_index][index] for row_index in range(len(confusion)))
@@ -240,7 +262,10 @@ def run_epoch(
     coarse_loss_weight: float,
     fine_loss_weight: float,
     fine_loss_reduction: str,
+    category_names: tuple[str, ...] | None = None,
 ) -> dict[str, float]:
+    if category_names is None:
+        category_names = CICIOT2023_SCHEMA.category_names
     model.train()
     total_loss = 0.0
     total = 0
@@ -255,7 +280,7 @@ def run_epoch(
             outputs,
             batch["coarse_targets"],
             batch["fine_targets"],
-            CATEGORY_NAMES,
+            category_names,
             coarse_weight=coarse_loss_weight,
             fine_weight=fine_loss_weight,
             fine_loss_reduction=fine_loss_reduction,
@@ -272,7 +297,11 @@ def run_epoch(
 
         batch_size = int(batch["coarse_targets"].shape[0])
         coarse_predictions = torch.argmax(coarse_logits, dim=1)
-        fine_predictions = predicted_fine_indices(outputs, coarse_predictions)
+        fine_predictions = predicted_fine_indices(
+            outputs,
+            coarse_predictions,
+            category_names,
+        )
         coarse_matches = coarse_predictions == batch["coarse_targets"]
         fine_matches = fine_predictions == batch["fine_targets"]
 
@@ -298,7 +327,10 @@ def evaluate(
     coarse_loss_weight: float,
     fine_loss_weight: float,
     fine_loss_reduction: str,
+    category_names: tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
+    if category_names is None:
+        category_names = CICIOT2023_SCHEMA.category_names
     model.eval()
     total_loss = 0.0
     total = 0
@@ -314,7 +346,7 @@ def evaluate(
             outputs,
             batch["coarse_targets"],
             batch["fine_targets"],
-            CATEGORY_NAMES,
+            category_names,
             coarse_weight=coarse_loss_weight,
             fine_weight=fine_loss_weight,
             fine_loss_reduction=fine_loss_reduction,
@@ -327,7 +359,11 @@ def evaluate(
 
         batch_size = int(batch["coarse_targets"].shape[0])
         coarse_predictions = torch.argmax(coarse_logits, dim=1)
-        fine_predictions = predicted_fine_indices(outputs, coarse_predictions)
+        fine_predictions = predicted_fine_indices(
+            outputs,
+            coarse_predictions,
+            category_names,
+        )
         coarse_matches = coarse_predictions == batch["coarse_targets"]
         fine_matches = fine_predictions == batch["fine_targets"]
 
@@ -341,7 +377,7 @@ def evaluate(
     confusion = build_confusion_matrix(
         coarse_targets_all,
         coarse_predictions_all,
-        len(CATEGORY_NAMES),
+        len(category_names),
     )
     metrics = macro_metrics(confusion)
     metrics.update(
@@ -350,25 +386,35 @@ def evaluate(
             "coarse_accuracy": coarse_correct / max(total, 1),
             "path_accuracy": path_correct / max(total, 1),
             "confusion_matrix": confusion,
-            "per_class": per_class_metrics(confusion),
+            "per_class": per_class_metrics(confusion, category_names),
         }
     )
     return metrics
 
 
-def print_counts(name: str, counts: list[int]) -> None:
+def print_counts(
+    name: str,
+    counts: list[int],
+    category_names: tuple[str, ...] | None = None,
+) -> None:
+    if category_names is None:
+        category_names = CICIOT2023_SCHEMA.category_names
     rendered = ", ".join(
-        f"{label}={count}" for label, count in zip(CATEGORY_NAMES, counts)
+        f"{label}={count}" for label, count in zip(category_names, counts)
     )
     print(f"{name}_counts={rendered}")
 
 
-def print_fine_counts(name: str, counts_by_category: dict[str, list[int]]) -> None:
-    for category in CATEGORY_NAMES:
+def print_fine_counts(
+    name: str,
+    counts_by_category: dict[str, list[int]],
+    label_schema: LabelSchema = CICIOT2023_SCHEMA,
+) -> None:
+    for category in label_schema.category_names:
         rendered = ", ".join(
             f"{fine_label}={count}"
             for fine_label, count in zip(
-                CATEGORY_TO_FINE_LABELS[category],
+                label_schema.category_to_fine_labels[category],
                 counts_by_category[category],
             )
         )
@@ -385,6 +431,12 @@ def main() -> None:
         raise ValueError("At least one loss weight must be positive")
     set_seed(args.seed)
     device = choose_device()
+    label_schema = (
+        LabelSchema.load(args.label_schema)
+        if args.label_schema
+        else CICIOT2023_SCHEMA
+    )
+    category_names = label_schema.category_names
 
     rows = read_manifest(args.manifest, project_root=PROJECT_ROOT)
     vocab = TokenVocab.load(args.vocab)
@@ -393,12 +445,14 @@ def main() -> None:
         vocab,
         split=args.train_split,
         max_events=args.max_events,
+        label_schema=label_schema,
     )
     val_dataset = SequenceChunkDataset(
         rows,
         vocab,
         split=args.val_split,
         max_events=args.max_events,
+        label_schema=label_schema,
     )
     if len(train_dataset) == 0:
         raise ValueError(f"No chunks found for train split {args.train_split!r}")
@@ -418,10 +472,10 @@ def main() -> None:
         collate_fn=collate_sequence_chunks,
     )
 
-    train_counts = coarse_counts(train_dataset)
-    val_counts = coarse_counts(val_dataset)
-    train_fine_counts = fine_counts_by_category(train_dataset)
-    val_fine_counts = fine_counts_by_category(val_dataset)
+    train_counts = coarse_counts(train_dataset, label_schema)
+    val_counts = coarse_counts(val_dataset, label_schema)
+    train_fine_counts = fine_counts_by_category(train_dataset, label_schema)
+    val_fine_counts = fine_counts_by_category(val_dataset, label_schema)
     coarse_class_weights = None
     if args.class_weighting == "balanced":
         coarse_class_weights = balanced_weights(train_counts, device)
@@ -434,7 +488,7 @@ def main() -> None:
 
     model = HierarchicalProtocolEventLSTM(
         len(vocab),
-        CATEGORY_TO_NUM_FINE,
+        label_schema.category_to_num_fine,
         embedding_dim=args.embedding_dim,
         hidden_dim=args.hidden_dim,
         num_layers=args.num_layers,
@@ -452,26 +506,27 @@ def main() -> None:
         f"fine_loss_weight={args.fine_loss_weight:.3f} "
         f"fine_loss_reduction={args.fine_loss_reduction}"
     )
-    print_counts("train", train_counts)
-    print_counts("val", val_counts)
-    print_fine_counts("train", train_fine_counts)
-    print_fine_counts("val", val_fine_counts)
+    print(f"label_schema={label_schema.name}")
+    print_counts("train", train_counts, category_names)
+    print_counts("val", val_counts, category_names)
+    print_fine_counts("train", train_fine_counts, label_schema)
+    print_fine_counts("val", val_fine_counts, label_schema)
     if coarse_class_weights is not None:
         weights_for_display = coarse_class_weights.detach().cpu().tolist()
         rendered_weights = ", ".join(
             f"{label}={float(weight):.3f}"
-            for label, weight in zip(CATEGORY_NAMES, weights_for_display)
+            for label, weight in zip(category_names, weights_for_display)
         )
         print(f"coarse_class_weights={rendered_weights}")
     if fine_class_weights_by_category is not None:
-        for category in CATEGORY_NAMES:
+        for category in category_names:
             weights_for_display = (
                 fine_class_weights_by_category[category].detach().cpu().tolist()
             )
             rendered_weights = ", ".join(
                 f"{fine_label}={float(weight):.3f}"
                 for fine_label, weight in zip(
-                    CATEGORY_TO_FINE_LABELS[category],
+                    label_schema.category_to_fine_labels[category],
                     weights_for_display,
                 )
             )
@@ -492,6 +547,7 @@ def main() -> None:
             args.coarse_loss_weight,
             args.fine_loss_weight,
             args.fine_loss_reduction,
+            category_names,
         )
         val_metrics = evaluate(
             model,
@@ -502,6 +558,7 @@ def main() -> None:
             args.coarse_loss_weight,
             args.fine_loss_weight,
             args.fine_loss_reduction,
+            category_names,
         )
         history.append(
             {
@@ -516,11 +573,12 @@ def main() -> None:
             best_state = {
                 "model_state_dict": copy.deepcopy(model.state_dict()),
                 "vocab_size": len(vocab),
-                "category_names": CATEGORY_NAMES,
-                "category_to_num_fine": CATEGORY_TO_NUM_FINE,
+                "label_schema": label_schema.to_json(),
+                "category_names": category_names,
+                "category_to_num_fine": label_schema.category_to_num_fine,
                 "args": vars(args),
-                "train_counts": dict(zip(CATEGORY_NAMES, train_counts)),
-                "val_counts": dict(zip(CATEGORY_NAMES, val_counts)),
+                "train_counts": dict(zip(category_names, train_counts)),
+                "val_counts": dict(zip(category_names, val_counts)),
                 "train_fine_counts": train_fine_counts,
                 "val_fine_counts": val_fine_counts,
                 "class_weighting": args.class_weighting,
